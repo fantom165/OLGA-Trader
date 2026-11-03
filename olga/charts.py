@@ -452,6 +452,46 @@ def market_chart(
     return fig
 
 
+def equity_line(curve: pd.DataFrame, pal: dict[str, str]) -> go.Figure:
+    """Hypothetical equity after each session's close. One line, one axis."""
+    fig = go.Figure()
+    if curve.empty or "Equity" not in curve.columns:
+        return _empty(fig, pal, "No equity history")
+
+    fig.add_trace(
+        go.Scatter(
+            x=curve["Date"],
+            y=curve["Equity"],
+            mode="lines",
+            name="Equity",
+            line={"color": pal["series_1"], "width": 2},
+            hovertemplate="%{x|%b %d, %Y}<br>Equity $%{y:,.2f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        **theme.layout(
+            pal,
+            title={
+                "text": "Equity after each close",
+                "font": {"size": 15, "color": pal["text_primary"]},
+                "x": 0.005,
+                "xanchor": "left",
+            },
+            height=320,
+            showlegend=False,
+            margin={"l": 8, "r": 8, "t": 48, "b": 8},
+        )
+    )
+    fig.update_xaxes(**theme.axis(pal, grid=False))
+    fig.update_yaxes(
+        **theme.axis(
+            pal,
+            title={"text": "Equity ($)", "font": {"color": pal["muted"]}},
+        )
+    )
+    return fig
+
+
 def _empty(fig: go.Figure, pal: dict[str, str], message: str) -> go.Figure:
     fig.update_layout(**theme.layout(pal, height=240, showlegend=False))
     fig.add_annotation(

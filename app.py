@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from olga import analysis as analysis_mod
-from olga import charts, chat, config, data, identity, llm as olga_llm, market, providers, rating, theme
+from olga import charts, chat, config, data, identity, llm as olga_llm, market, paper, providers, rating, theme
 from olga.indicators import ACCUMULATION, DISTRIBUTION, NEUTRAL
 
 PERIOD_CHOICES = {
@@ -139,6 +139,30 @@ def load_bars(
         period=period,
         provider=provider,
         use_cache=not skip_disk,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def run_paper_cached(
+    ticker: str,
+    period: str,
+    provider: str,
+    daily: pd.DataFrame,
+    index_names: tuple[str, ...],
+    index_frames: tuple[pd.DataFrame, ...],
+    settings: config.Settings,
+    cash: float,
+    hard_stop: bool,
+) -> paper.PaperResult:
+    """Paper blotter for bars already loaded. No extra vendor calls."""
+    indexes = {name: frame for name, frame in zip(index_names, index_frames)}
+    return paper.run_paper(
+        daily,
+        indexes,
+        settings,
+        cash=cash,
+        ticker=ticker,
+        hard_stop=hard_stop,
     )
 
 
@@ -349,10 +373,11 @@ if not analyses:
     st.error("No usable price history. Check the ticker symbols in the sidebar.")
     st.stop()
 
-tab_watchlist, tab_detail, tab_market, tab_ask, tab_method = st.tabs(
+tab_watchlist, tab_detail, tab_paper, tab_market, tab_ask, tab_method = st.tabs(
     [
         "Watchlist",
         "Stock detail",
+        "Paper trades",
         "Market pressure",
         "Ask OLGA",
         "How to read this",
@@ -607,6 +632,203 @@ with tab_detail:
                 "VolRatio": st.column_config.NumberColumn("Vol x avg", format="%.2fx"),
                 "Volume": st.column_config.NumberColumn("Volume", format="%d"),
             },
+        )
+
+# --------------------------------------------------------------------------- #
+# Paper trades
+# --------------------------------------------------------------------------- #
+with tab_paper:
+    st.markdown(
+        "<div class='olga-callout'>Paper trades only. Hypothetical fills and "
+        "P&amp;L for one ticker — not a live account, and not investment advice."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    order = table["Ticker"].tolist() if not table.empty else sorted(analyses)
+    paper_cols = st.columns([2, 1, 1])
+    paper_ticker = paper_cols[0].selectbox(
+        "Stock", order, index=0, key="paper_ticker"
+    )
+    paper_cash = paper_cols[1].number_input(
+        "Starting cash",
+        min_value=1.0,
+        value=10_000.0,
+        step=1_000.0,
+        format="%.2f",
+        help="Whole shares, 100% of this cash in the one name. Leftover cash "
+        "stays idle. No commissions, no shorts, no second position.",
+    )
+    paper_stop = paper_cols[2].checkbox(
+        "Hard stop under entry support",
+        value=True,
+        help="If the close prints below the support level from the day OLGA "
+        "signaled the buy, sell at the next open. On by default: the Exit "
+        "watch checklist has no price stop of its own.",
+    )
+    st.caption(
+        "Long only, one name. Enter when the top buy scenario is Best — live "
+        "(light-volume pullback near support, or an accumulation week). "
+        "A C-grade buy is ignored. Those reads happen on the last session of "
+        "each week. Fill the next session's open — never the signal bar. "
+        "Exit the next open when any Exit watch item is triggered, or when a "
+        "close prints under the entry-date support (that stop checks every "
+        "session). Still open at the end of the loaded history is marked to "
+        "the last close, not sold."
+    )
+
+    paper_signature = (
+        paper_ticker,
+        period,
+        cfg.provider,
+        float(paper_cash),
+        bool(paper_stop),
+        settings,
+        st.session_state.nonce,
+    )
+    if st.button("Run paper trades", key="paper_run"):
+        st.session_state.paper_signature = paper_signature
+
+    if st.session_state.get("paper_signature") != paper_signature:
+        st.caption("Press Run to paper-trade the loaded history for this ticker.")
+    else:
+        index_names = tuple(
+            name
+            for name in cfg.indexes
+            if name in result.bars and not result.bars[name].empty
+        )
+        index_frames = tuple(result.bars[name] for name in index_names)
+        with st.spinner("Walking each completed session…"):
+            paper_result = run_paper_cached(
+                paper_ticker,
+                period,
+                cfg.provider,
+                analyses[paper_ticker].daily,
+                index_names,
+                index_frames,
+                settings,
+                float(paper_cash),
+                bool(paper_stop),
+            )
+
+        ret = paper_result.total_return_pct
+        win = paper_result.win_rate
+        tiles = st.columns(5)
+        tiles[0].markdown(
+            tile(
+                "Ending equity",
+                f"${fmt(paper_result.ending_equity, ',.0f')}",
+                f"started ${fmt(paper_result.starting_cash, ',.0f')}",
+            ),
+            unsafe_allow_html=True,
+        )
+        tiles[1].markdown(
+            tile("Total P&L", f"{fmt(ret, '+.1f')}%", "hypothetical, one name"),
+            unsafe_allow_html=True,
+        )
+        tiles[2].markdown(
+            tile(
+                "Win rate",
+                "—" if not math.isfinite(win) else f"{win * 100:.0f}%",
+                "closed trades only",
+            ),
+            unsafe_allow_html=True,
+        )
+        tiles[3].markdown(
+            tile(
+                "Trades",
+                str(paper_result.trade_count),
+                "open row included" if paper_result.open_trade else "all closed",
+            ),
+            unsafe_allow_html=True,
+        )
+        tiles[4].markdown(
+            tile(
+                "Max drawdown",
+                f"{paper_result.max_drawdown * 100:.1f}%",
+                "peak to trough on equity",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"Idle cash ${fmt(paper_result.cash, ',.2f')}. "
+            "Whole shares, next-open fills, no commissions."
+        )
+
+        blotter_rows = list(paper_result.closed)
+        if paper_result.open_trade is not None:
+            blotter_rows.append(paper_result.open_trade)
+        if not blotter_rows:
+            st.info(
+                "No Best — live entry in this history. The name stayed flat."
+            )
+        else:
+            blotter = pd.DataFrame(
+                [
+                    {
+                        "Status": "Open" if trade.status == "open" else "Closed",
+                        "Signal": pd.Timestamp(trade.signal_date).date(),
+                        "Entry": pd.Timestamp(trade.entry_date).date(),
+                        "Entry price": trade.entry_price,
+                        "Entry reason": trade.entry_reason,
+                        "Shares": trade.shares,
+                        "Exit": (
+                            None
+                            if trade.exit_date is None
+                            else pd.Timestamp(trade.exit_date).date()
+                        ),
+                        "Exit / mark": trade.exit_price,
+                        "Exit reason": trade.exit_reason,
+                        "P&L": trade.pnl,
+                        "Return %": trade.return_pct,
+                    }
+                    for trade in blotter_rows
+                ]
+            )
+            st.dataframe(
+                blotter,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Entry price": st.column_config.NumberColumn(format="$%.2f"),
+                    "Exit / mark": st.column_config.NumberColumn(format="$%.2f"),
+                    "Shares": st.column_config.NumberColumn(format="%d"),
+                    "P&L": st.column_config.NumberColumn(format="$%+.2f"),
+                    "Return %": st.column_config.NumberColumn(format="%+.1f%%"),
+                },
+            )
+            if paper_result.open_trade is not None:
+                st.caption(
+                    "The open row is marked to the last close. That price is not a fill."
+                )
+
+        st.plotly_chart(
+            charts.equity_line(paper_result.equity_curve, PAL),
+            width="stretch",
+            theme=None,
+            config={"displaylogo": False},
+        )
+        st.caption(
+            "Hypothetical. Next-open fills, one name, not a live account. "
+            "The table is the full value view of the line."
+        )
+
+        st.markdown(
+            """
+### Disclaimer
+
+OLGA Trader is an informational tool. It infers possible institutional
+activity from public price and volume. It does not prove who is buying or
+selling, it does not predict future prices, and it is not investment,
+trading, tax, or legal advice. You are solely responsible for your own
+decisions and for any money you put at risk.
+
+Andrew Randolph, We Work For You, LLC, and the OLGA Trader app are not
+liable for any losses, damages, costs, or claims arising from use of the
+app, reliance on its grades, charts, chat answers, or other output, or from
+errors, delays, outages, or incomplete data. Past readings are not a
+guarantee of future results. If you are not willing to accept that, do not
+use the app.
+            """
         )
 
 # --------------------------------------------------------------------------- #
