@@ -1,7 +1,7 @@
-# OLGA Trader — Cloud Run–ready Streamlit image.
-# Build:  docker build -t gcr.io/olga-trader/olga-trader:latest .
-# Run:    docker run --rm -p 8080:8080 -e PORT=8080 gcr.io/olga-trader/olga-trader:latest
-# Do not bake API keys into the image — pass them as Cloud Run env / secrets.
+# OLGA Trader — Cloud Run Streamlit image.
+# GitHub Actions builds this and updates the existing service. The image name
+# is us-central1-docker.pkg.dev/olga-trader/olga/olga-trader.
+# Do not bake API keys into the image — Cloud Run already holds them.
 
 FROM python:3.13-slim
 

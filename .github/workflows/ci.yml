@@ -1,0 +1,72 @@
+# Build the Cloud Run image on every pull request and on main.
+# A push to main also publishes the image and updates the existing service.
+# The update changes only the image, so Cloud Run env vars (including the
+# Tiingo key) stay as they are.
+
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: olga-trader-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PROJECT: olga-trader
+  REGION: us-central1
+  SERVICE: olga-trader
+  IMAGE: us-central1-docker.pkg.dev/olga-trader/olga/olga-trader
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/783090096367/locations/global/workloadIdentityPools/github/providers/github
+          service_account: github-actions@olga-trader.iam.gserviceaccount.com
+
+      - name: Log in to Artifact Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: us-central1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+      - name: Deploy to Cloud Run
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          gcloud run services update "$SERVICE" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --image "${IMAGE}:${GITHUB_SHA}" \
+            --quiet
