@@ -37,6 +37,7 @@ jobs:
         with:
           workload_identity_provider: projects/783090096367/locations/global/workloadIdentityPools/github/providers/github
           service_account: github-actions@olga-trader.iam.gserviceaccount.com
+          token_format: access_token
 
       - name: Log in to Artifact Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
