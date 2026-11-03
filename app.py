@@ -142,6 +142,37 @@ def load_bars(
     )
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_analyses(
+    bars: dict[str, pd.DataFrame],
+    settings: config.Settings,
+) -> dict[str, analysis_mod.StockAnalysis]:
+    """Same lifetime as ``load_bars``. A chat turn must not redo every ticker."""
+    return analysis_mod.analyze_all(bars, settings)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def detail_charts(
+    item: analysis_mod.StockAnalysis, mode: str, weeks: int
+) -> tuple:
+    pal = theme.palette(mode)
+    return (
+        charts.weekly_footprint(item, pal, weeks=weeks),
+        charts.ud_ratio_chart(item, pal),
+        charts.ad_trend_chart(item, pal),
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_market_chart(health: market.MarketHealth, mode: str):
+    return charts.market_chart(health, theme.palette(mode))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_equity_chart(curve: pd.DataFrame, mode: str):
+    return charts.equity_line(curve, theme.palette(mode))
+
+
 @st.cache_data(show_spinner=False)
 def run_paper_cached(
     ticker: str,
@@ -306,7 +337,7 @@ with st.spinner("Loading price and volume history…"):
     )
 
 stock_bars = {t: f for t, f in result.bars.items() if t in cfg.tickers}
-analyses = analysis_mod.analyze_all(stock_bars, settings)
+analyses = load_analyses(stock_bars, settings)
 table = analysis_mod.watchlist_table(analyses)
 health = market.analyze_indexes(
     result.bars,
@@ -381,7 +412,9 @@ tab_watchlist, tab_detail, tab_paper, tab_market, tab_ask, tab_method = st.tabs(
         "Market pressure",
         "Ask OLGA",
         "How to read this",
-    ]
+    ],
+    key="olga_section",
+    on_change="rerun",
 )
 
 # --------------------------------------------------------------------------- #
@@ -541,28 +574,30 @@ with tab_detail:
             "until the week closes."
         )
 
-    st.plotly_chart(
-        charts.weekly_footprint(item, PAL, weeks=weeks_shown),
-        width="stretch",
-        theme=None,
-        config={"displaylogo": False},
-    )
+    if tab_detail.open:
+        weekly_fig, ud_fig, ad_fig = detail_charts(item, MODE, weeks_shown)
+        st.plotly_chart(
+            weekly_fig,
+            width="stretch",
+            theme=None,
+            config={"displaylogo": False},
+        )
 
-    left, right = st.columns(2)
-    with left:
-        st.plotly_chart(
-            charts.ud_ratio_chart(item, PAL),
-            width="stretch",
-            theme=None,
-            config={"displaylogo": False},
-        )
-    with right:
-        st.plotly_chart(
-            charts.ad_trend_chart(item, PAL),
-            width="stretch",
-            theme=None,
-            config={"displaylogo": False},
-        )
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(
+                ud_fig,
+                width="stretch",
+                theme=None,
+                config={"displaylogo": False},
+            )
+        with right:
+            st.plotly_chart(
+                ad_fig,
+                width="stretch",
+                theme=None,
+                config={"displaylogo": False},
+            )
 
     breakdown, levels_col = st.columns([3, 2])
     with breakdown:
@@ -801,12 +836,13 @@ with tab_paper:
                     "The open row is marked to the last close. That price is not a fill."
                 )
 
-        st.plotly_chart(
-            charts.equity_line(paper_result.equity_curve, PAL),
-            width="stretch",
-            theme=None,
-            config={"displaylogo": False},
-        )
+        if tab_paper.open:
+            st.plotly_chart(
+                cached_equity_chart(paper_result.equity_curve, MODE),
+                width="stretch",
+                theme=None,
+                config={"displaylogo": False},
+            )
         st.caption(
             "Hypothetical. Next-open fills, one name, not a live account. "
             "The table is the full value view of the line."
@@ -872,11 +908,12 @@ with tab_market:
                 f"{index_health.verdict}</span>",
                 unsafe_allow_html=True,
             )
-            st.plotly_chart(
-                charts.market_chart(index_health, PAL),
-                width="stretch",
-                config={"displaylogo": False},
-            )
+            if tab_market.open:
+                st.plotly_chart(
+                    cached_market_chart(index_health, MODE),
+                    width="stretch",
+                    config={"displaylogo": False},
+                )
             with st.expander(f"Distribution days — {index_health.name}"):
                 frame = index_health.frame
                 flagged = frame[frame["IsDistributionDay"]].tail(30).iloc[::-1]
@@ -964,10 +1001,9 @@ with tab_ask:
         ):
             st.session_state.olga_pending = prompt
 
-    for message in st.session_state.olga_chat:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
+    # The transcript container is created first so the reply can fill it in
+    # this same run. The input stays under it, with no second full-script rerun.
+    transcript = st.container()
     pending = st.session_state.pop("olga_pending", None)
     user_text = st.chat_input("Ask about a grade, buy fit, exit watch, market…")
     question = pending or user_text
@@ -989,7 +1025,11 @@ with tab_ask:
                 history=st.session_state.olga_chat,
             )
         st.session_state.olga_chat.append({"role": "assistant", "content": reply})
-        st.rerun()
+
+    with transcript:
+        for message in st.session_state.olga_chat:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
 # --------------------------------------------------------------------------- #
 # Method

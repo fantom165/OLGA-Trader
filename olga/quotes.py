@@ -1,9 +1,9 @@
 """A fresh last trade, separate from the cached daily bars.
 
 Daily history is cached for hours, and the newest bar's close can still be
-today's open. A "current price" question has to read a quote. The last trade,
-the session open, and the previous close stay separate fields so a reply
-cannot substitute one for another.
+today's open. A "current price" question reads one quote response: Tiingo
+IEX when a key is set, otherwise a Yahoo quote. The last trade, the session
+open, and the previous close stay separate fields.
 """
 
 from __future__ import annotations
@@ -11,12 +11,12 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
+from urllib.parse import quote as urlquote
 
 import pandas as pd
 
 from . import config
-from .providers import polygon, tiingo
-from .providers.base import request_json
+from .providers import tiingo
 
 QUOTE_TTL_SECONDS = 45
 _STALE_AFTER = pd.Timedelta(minutes=20)
@@ -184,81 +184,113 @@ def fetch(ticker: str, *, use_cache: bool = True) -> Quote | None:
     return quote
 
 
+def quote_from_yahoo(ticker: str, payload: object) -> Quote | None:
+    """Last trade from one Yahoo chart quote. Never the session open."""
+    if not isinstance(payload, dict):
+        return None
+    chart = payload.get("chart")
+    if not isinstance(chart, dict):
+        return None
+    rows = chart.get("result") or []
+    if not rows or not isinstance(rows[0], dict):
+        return None
+    block = rows[0]
+    meta = block.get("meta") if isinstance(block.get("meta"), dict) else {}
+    last = _finite(meta.get("regularMarketPrice"))
+    if last is None or last <= 0:
+        return None
+    previous = _finite(meta.get("chartPreviousClose"))
+    if previous is None:
+        previous = _finite(meta.get("previousClose"))
+    return Quote(
+        ticker=ticker,
+        last=last,
+        open=_yahoo_open(block),
+        previous_close=previous,
+        as_of=_epoch(meta.get("regularMarketTime")),
+        source="yahoo",
+        detail="Yahoo Finance quote, may be delayed",
+    )
+
+
 def _fetch_fresh(symbol: str) -> Quote | None:
-    getters = (_from_yahoo,)
-    if not symbol.startswith("^"):
-        getters = (_from_yahoo, _from_polygon, _from_tiingo)
+    # One small response. Tiingo IEX when the key is set; Yahoo quote otherwise.
+    # Indexes are not on the IEX endpoint.
+    getters = [_from_yahoo]
+    if not symbol.startswith("^") and tiingo.api_key() is not None:
+        getters = [_from_tiingo, _from_yahoo]
     for getter in getters:
         try:
-            quote = getter(symbol)
+            found = getter(symbol)
         except Exception:
-            quote = None
-        if quote is not None:
-            return quote
+            found = None
+        if found is not None:
+            return found
     return None
 
 
 def _from_yahoo(symbol: str) -> Quote | None:
-    import yfinance as yf
-
-    hist = yf.Ticker(symbol).history(
-        period="5d",
-        interval="1m",
-        auto_adjust=False,
-        prepost=False,
-        timeout=15,
+    payload = _get_json(
+        "https://query1.finance.yahoo.com/v8/finance/chart/" + urlquote(symbol, safe=""),
+        params={"range": "1d", "interval": "1d", "includePrePost": "false"},
+        headers={"User-Agent": "Mozilla/5.0"},
     )
-    return quote_from_ohlcv(
-        symbol,
-        hist,
-        source="yahoo",
-        detail="Yahoo Finance 1-minute bars, may be delayed",
-    )
-
-
-def _from_polygon(symbol: str) -> Quote | None:
-    if polygon.api_key() is None:
-        return None
-    import requests
-
-    session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {polygon.api_key()}"})
-    vendor = symbol.replace("-", ".")
-    try:
-        payload = request_json(
-            session,
-            f"{polygon.BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers/{vendor}",
-        )
-    finally:
-        session.close()
-    return quote_from_polygon(symbol, payload)
+    return quote_from_yahoo(symbol, payload)
 
 
 def _from_tiingo(symbol: str) -> Quote | None:
     if tiingo.api_key() is None:
         return None
-    import requests
-
-    session = requests.Session()
-    session.headers.update(
-        {"Authorization": f"Token {tiingo.api_key()}", "Content-Type": "application/json"}
+    payload = _get_json(
+        f"{tiingo.BASE_URL}/iex/{urlquote(symbol, safe='')}",
+        headers={
+            "Authorization": f"Token {tiingo.api_key()}",
+            "Content-Type": "application/json",
+        },
     )
-    try:
-        payload = request_json(session, f"{tiingo.BASE_URL}/iex/{symbol}")
-    finally:
-        session.close()
-    quote = quote_from_tiingo(payload)
-    if quote is None:
+    found = quote_from_tiingo(payload)
+    if found is None:
         return None
     return Quote(
         ticker=symbol,
-        last=quote.last,
-        open=quote.open,
-        previous_close=quote.previous_close,
-        as_of=quote.as_of,
-        source=quote.source,
-        detail=quote.detail,
+        last=found.last,
+        open=found.open,
+        previous_close=found.previous_close,
+        as_of=found.as_of,
+        source=found.source,
+        detail=found.detail,
     )
+
+
+def _get_json(
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> object:
+    """One GET. A quote must not sit through the daily-bar retry loop."""
+    import requests
+
+    response = requests.get(url, params=params, headers=headers, timeout=8)
+    response.raise_for_status()
+    return response.json()
+
+
+def _yahoo_open(block: dict) -> float | None:
+    indicators = block.get("indicators")
+    if not isinstance(indicators, dict):
+        return None
+    quotes = indicators.get("quote") or []
+    if not quotes or not isinstance(quotes[0], dict):
+        return None
+    opens = quotes[0].get("open")
+    if not isinstance(opens, list):
+        return None
+    for value in reversed(opens):
+        number = _finite(value)
+        if number is not None and number > 0:
+            return number
+    return None
 
 
 def _polygon_ticker(payload: object) -> dict | None:
