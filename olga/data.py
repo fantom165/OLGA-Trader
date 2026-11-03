@@ -24,7 +24,7 @@ import pandas as pd
 from . import config, providers
 from .providers import OHLCV, ProviderError  # noqa: F401  — re-exported
 
-CACHE_TTL_SECONDS = 60 * 60 * 4  # intraday staleness is irrelevant for daily bars
+CACHE_TTL_SECONDS = 60 * 60 * 4  # daily history. Live prices go through olga.quotes.
 
 # How far back each period string reaches. Providers are date-based, so the
 # conversion happens once, here, rather than in every provider.

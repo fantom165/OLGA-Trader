@@ -10,6 +10,7 @@ Each substantive reply keeps an analyst-style breakdown and ends with a short
 
 from __future__ import annotations
 
+import math
 import re
 
 import pandas as pd
@@ -18,6 +19,7 @@ from .analysis import StockAnalysis
 from .config import Settings
 from .indicators import ACCUMULATION, DISTRIBUTION, NEUTRAL
 from .market import MarketHealth
+from .quotes import Quote, is_stale
 from .rating import COMPONENT_LABELS, COMPONENT_WEIGHTS
 
 SUGGESTIONS = [
@@ -28,6 +30,7 @@ SUGGESTIONS = [
     "Exit watch for the focused stock",
     "How is market pressure?",
     "What does the grade mean?",
+    "Current price of the focused stock",
 ]
 
 
@@ -517,7 +520,8 @@ def _help_text(tickers: list[str]) -> str:
         "- Buy scenarios / should I buy the pullback?\n"
         "- Exit watch / when would the thesis break?\n"
         "- How is market pressure?\n"
-        "- What does the grade mean?\n\n"
+        "- What does the grade mean?\n"
+        "- Current price of AMD (last trade, kept separate from today's open)\n\n"
         f"On the board now: {names}."
     )
 
@@ -547,6 +551,9 @@ Hard rules:
 - If the user asks something outside OLGA (news, earnings gossip, options
   greeks), refuse and steer back to footprint readings.
 - Prefer the focused ticker when the user does not name one.
+- daily_close is the last cached daily bar. It can still equal today's open.
+  It is not a live price. Only a LIVE QUOTE last trade answers "current price".
+  If that block is absent, say a live quote is not in the context.
 """
 
 
@@ -566,6 +573,8 @@ def dashboard_context(
         f"heavy volume ≥ {settings.weekly_vol_multiple:.2f}×; "
         f"U/D window {settings.ud_window}d; weekly lookback "
         f"{settings.signal_lookback_weeks}w.",
+        "daily_close is the last cached daily bar, not a live quote. "
+        "It can still equal today's open.",
         "",
         "WATCHLIST (ranked by composite score, strongest first):",
     ]
@@ -576,7 +585,7 @@ def dashboard_context(
             lines.append(
                 f"{i + 1}. {row['Ticker']}: grade={row['Grade']} "
                 f"score={_fmt(float(row['Score']), '.1f')} stance={row['Stance']} "
-                f"close={_fmt(float(row['Close']))} day%={_fmt(float(row['Day %']), '+.2f')} "
+                f"daily_close={_fmt(float(row['Close']))} day%={_fmt(float(row['Day %']), '+.2f')} "
                 f"U/D={_fmt(float(row['U/D Ratio']))} "
                 f"week_close_in_range={_fmt(float(row['Week Close in Range']) * 100, '.0f')}% "
                 f"week_vol_x={_fmt(float(row['Week Vol x Avg']))} "
@@ -643,6 +652,188 @@ def _history_for_llm(
     return prior[-6:]
 
 
+_NOT_TICKERS = frozenset(
+    {
+        "A", "I", "AM", "PM", "ET", "THE", "AND", "FOR", "WHAT", "WHATS",
+        "WHY", "HOW", "WHO", "USD", "OLGA", "LIVE", "CURRENT", "PRICE",
+        "QUOTE", "LAST", "OPEN", "CLOSE", "TODAY", "NOW", "AT", "IS", "IT",
+        "OF", "MY", "ME", "DAY", "WEEK", "HIGH", "LOW", "STOCK", "SHARE",
+        "MARKET", "PRINT", "TRADE", "TRADING", "RIGHT", "PLEASE", "TELL",
+        "MUCH", "DOES", "DID", "ARE", "WAS", "ITS", "FROM", "WITH", "THIS",
+        "THAT", "YOUR", "JUST", "ONLY", "GIVE", "SHOW", "NEED", "WANT",
+        "FOCUSED",
+    }
+)
+
+
+def _wants_footprint_too(question: str) -> bool:
+    """A price question that also asks for the grade, buy fit, or exit watch."""
+    lower = question.lower()
+    return any(
+        word in lower
+        for word in (
+            "why",
+            "grade",
+            "buy",
+            "exit",
+            "summar",
+            "accumul",
+            "distribution",
+            "churn",
+        )
+    )
+
+
+def wants_quote(question: str) -> bool:
+    """True when the user is asking for a price, not a footprint reading."""
+    lower = (question or "").lower()
+    if "price action" in lower or "price range" in lower:
+        return False
+    if re.search(r"\bprice\b", lower):
+        return True
+    return any(
+        phrase in lower
+        for phrase in (
+            "quote",
+            "trading at",
+            "trade at",
+            "last print",
+            "last trade",
+            "last sale",
+            "how much is",
+            "how much does",
+            "how much are",
+        )
+    )
+
+
+def _quote_ticker(
+    question: str,
+    analyses: dict[str, StockAnalysis],
+    focus: str | None,
+) -> str | None:
+    """Ticker named in the question, else the focus stock."""
+    named = _explicit_board_ticker(question, analyses)
+    if named:
+        return named
+    for token in re.findall(r"\b[A-Z]{1,5}(?:[.-][A-Z]{1,2})?\b", question.upper()):
+        if token not in _NOT_TICKERS:
+            from .config import normalize_ticker
+
+            return normalize_ticker(token)
+    if focus:
+        return focus
+    return None
+
+
+def _explicit_board_ticker(
+    question: str, analyses: dict[str, StockAnalysis]
+) -> str | None:
+    upper = question.upper()
+    for ticker in sorted(analyses, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(ticker)}\b", upper):
+            return ticker
+    return None
+
+
+def _quote_when(as_of: pd.Timestamp | None) -> str:
+    if as_of is None or pd.isna(as_of):
+        return ""
+    stamp = pd.Timestamp(as_of)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("America/New_York")
+    else:
+        stamp = stamp.tz_convert("America/New_York")
+    hour = stamp.strftime("%I").lstrip("0") or "12"
+    return f"{stamp.strftime('%b')} {stamp.day}, {hour}:{stamp.strftime('%M %p')} ET"
+
+
+def _quote_reply(
+    ticker: str | None,
+    quote: Quote | None,
+    item: StockAnalysis | None,
+) -> str:
+    """Last trade, with today's open named as its own figure."""
+    if not ticker:
+        body = (
+            "Name a ticker — for example, “what is AMD's current price” — "
+            "or set the focus stock."
+        )
+        return _with_trader_take(
+            body,
+            "No ticker, no print. Pick the name before you use a price.",
+        )
+
+    if quote is None or not math.isfinite(quote.last):
+        lines = [f"A fresh quote for **{ticker}** did not come back."]
+        if item is not None and math.isfinite(item.last_close):
+            when = pd.Timestamp(item.last_date).date()
+            lines.append(
+                f"The cached daily close on the dashboard is {_fmt(item.last_close)} "
+                f"({when}). That figure feeds the grades."
+            )
+        return _with_trader_take(
+            "\n\n".join(lines),
+            f"**{ticker}** has no fresh quote right now. Check the broker tape "
+            "before you use a price from the board.",
+        )
+
+    when = _quote_when(quote.as_of)
+    headline = f"**{ticker}** last trade **{_fmt(quote.last)}**"
+    if when:
+        headline += f" as of {when}"
+    headline += f". Source: {quote.detail}."
+    lines = [headline]
+
+    extras: list[str] = []
+    if quote.open is not None:
+        extras.append(f"today's open {_fmt(quote.open)}")
+    if quote.previous_close is not None and quote.previous_close > 0:
+        change = (quote.last / quote.previous_close - 1.0) * 100.0
+        extras.append(
+            f"previous close {_fmt(quote.previous_close)} "
+            f"({_fmt(change, '+.2f')}% from that close)"
+        )
+    if extras:
+        lines.append("Alongside the last trade: " + "; ".join(extras) + ".")
+    if is_stale(quote.as_of):
+        lines.append("That print is more than 20 minutes old.")
+    if item is not None and math.isfinite(item.last_close):
+        daily = item.last_close
+        if abs(daily - quote.last) / quote.last > 0.002:
+            when_daily = pd.Timestamp(item.last_date).date()
+            lines.append(
+                f"The grade on the dashboard still uses the cached daily close "
+                f"{_fmt(daily)} ({when_daily})."
+            )
+
+    if is_stale(quote.as_of):
+        take = (
+            f"**{ticker}** last print is {_fmt(quote.last)} and it is more "
+            "than 20 minutes old."
+        )
+    elif quote.open is not None:
+        gap = quote.last - quote.open
+        if gap > 0:
+            take = (
+                f"**{ticker}** last is {_fmt(quote.last)}, {_fmt(gap)} above "
+                f"today's open of {_fmt(quote.open)}."
+            )
+        elif gap < 0:
+            take = (
+                f"**{ticker}** last is {_fmt(quote.last)}, {_fmt(abs(gap))} under "
+                f"today's open of {_fmt(quote.open)}."
+            )
+        else:
+            take = (
+                f"**{ticker}** last trade is {_fmt(quote.last)}, the same as "
+                "today's open."
+            )
+    else:
+        take = f"**{ticker}** last trade is {_fmt(quote.last)}."
+    return _with_trader_take("\n\n".join(lines), take)
+
+
 def answer(
     question: str,
     *,
@@ -654,11 +845,31 @@ def answer(
     history: list[dict[str, str]] | None = None,
 ) -> str:
     """Reply from Gemini when available; otherwise the rule-based packer."""
-    from . import llm
+    from . import llm, quotes
 
     q = (question or "").strip()
     if not q:
         return _help_text(list(analyses))
+
+    if wants_quote(q):
+        ticker = _quote_ticker(q, analyses, focus)
+        fetched: Quote | None = None
+        if ticker:
+            try:
+                fetched = quotes.fetch(ticker)
+            except Exception:
+                fetched = None
+        reply = _quote_reply(ticker, fetched, analyses.get(ticker) if ticker else None)
+        if _wants_footprint_too(q) and ticker and ticker in analyses:
+            reply += "\n\n" + answer_rules(
+                q,
+                analyses=analyses,
+                table=table,
+                health=health,
+                settings=settings,
+                focus=ticker,
+            )
+        return reply
 
     if llm.enabled():
         try:

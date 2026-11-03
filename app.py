@@ -911,9 +911,9 @@ with tab_ask:
     llm_ok, llm_note = olga_llm.status()
     st.markdown(
         f"<div class='olga-callout'>Ask about the numbers on this dashboard. "
-        f"Gemini answers from the live watchlist, stock detail, and market "
-        f"pressure only — analyst breakdown plus a short "
-        f"<b>Day-trader take</b>. Not a forecast engine."
+        f"A price question uses a fresh last trade, kept separate from today's "
+        f"open. Grades still come from the cached daily bars. "
+        f"Analyst breakdown plus a short <b>Day-trader take</b>. Not a forecast engine."
         f"<br><span style='color:{PAL['muted']}'>{llm_note}</span></div>",
         unsafe_allow_html=True,
     )
@@ -973,15 +973,21 @@ with tab_ask:
     question = pending or user_text
     if question:
         st.session_state.olga_chat.append({"role": "user", "content": question})
-        reply = chat.answer(
-            question,
-            analyses=analyses,
-            table=table,
-            health=health,
-            settings=settings,
-            focus=st.session_state.chat_focus,
-            history=st.session_state.olga_chat,
+        spinner = (
+            "Fetching a fresh quote…"
+            if chat.wants_quote(question)
+            else "Reading the dashboard…"
         )
+        with st.spinner(spinner):
+            reply = chat.answer(
+                question,
+                analyses=analyses,
+                table=table,
+                health=health,
+                settings=settings,
+                focus=st.session_state.chat_focus,
+                history=st.session_state.olga_chat,
+            )
         st.session_state.olga_chat.append({"role": "assistant", "content": reply})
         st.rerun()
 
