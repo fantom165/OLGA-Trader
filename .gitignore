@@ -1,0 +1,21 @@
+# Secrets — API keys live here.
+.env
+
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+
+# Personal watchlists — one JSON file per signed-in viewer.
+config/users/*.json
+config/users/*.json.tmp
+
+# Local tests
+*_test.py
+test_*.py
+tests/
+.pytest_cache/
+
+# Local tool state
+.claude/
+.cursor/

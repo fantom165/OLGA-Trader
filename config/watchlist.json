@@ -1,0 +1,35 @@
+{
+  "tickers": [
+    "NVDA",
+    "MSFT",
+    "AAPL",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "AVGO",
+    "AMD",
+    "MU",
+    "TTD",
+    "PLTR",
+    "NFLX",
+    "AAL",
+    "GPRO"
+  ],
+  "indexes": [
+    "^GSPC",
+    "^IXIC"
+  ],
+  "data": {
+    "provider": "auto"
+  },
+  "settings": {
+    "ud_window": 50,
+    "weekly_vol_window": 10,
+    "weekly_vol_multiple": 1.25,
+    "accumulation_close_position": 0.7,
+    "distribution_close_position": 0.3,
+    "signal_lookback_weeks": 13,
+    "distribution_day_pct": -0.2,
+    "distribution_day_window": 25
+  }
+}
