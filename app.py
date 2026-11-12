@@ -220,12 +220,20 @@ with st.sidebar:
         "active provider's spelling automatically. Saved to your account only.",
     )
     if st.button("Save watchlist", width="stretch"):
-        cfg.tickers = config.dedupe(
-            [config.normalize_ticker(line) for line in edited.splitlines()]
-        )
+        lines = [line.strip() for line in edited.splitlines() if line.strip()]
+        st.session_state.watchlist_rejected = [
+            line for line in lines if not config.normalize_ticker(line)
+        ]
+        cfg.tickers = config.dedupe(config.normalize_ticker(line) for line in lines)
         config.save_user(viewer.key, cfg)
         st.session_state.nonce += 1
         st.rerun()
+    rejected = st.session_state.get("watchlist_rejected")
+    if rejected:
+        st.warning(
+            f"Skipped {len(rejected)} entr{'y' if len(rejected) == 1 else 'ies'} "
+            "that are not ticker symbols (letters, digits, . - = and a leading ^ only)."
+        )
 
     st.markdown("### View")
     period_label = st.selectbox("History to load", list(PERIOD_CHOICES), index=2)

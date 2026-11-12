@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -90,8 +91,16 @@ class Config:
         }
 
 
+# Yahoo-style symbols only: NVDA, BRK-B, BRK.B, ^GSPC, ES=F, BTC-USD.
+# Tickers flow into the Ask OLGA prompt and into unsafe_allow_html tiles, so
+# anything else (prose, markup) is rejected here rather than escaped later.
+_TICKER = re.compile(r"\^?[A-Z0-9][A-Z0-9.=-]{0,14}")
+
+
 def normalize_ticker(raw: str) -> str:
-    return raw.strip().upper().replace(" ", "")
+    """Upper-cased symbol, or ``""`` if ``raw`` is not a plausible ticker."""
+    ticker = str(raw or "").strip().upper().replace(" ", "")
+    return ticker if _TICKER.fullmatch(ticker) else ""
 
 
 def load() -> Config:
