@@ -554,6 +554,12 @@ Hard rules:
 - daily_close is the last cached daily bar. It can still equal today's open.
   It is not a live price. Only a LIVE QUOTE last trade answers "current price".
   If that block is absent, say a live quote is not in the context.
+- When you compare price to support, resistance, or another level, use the
+  LIVE QUOTE last trade for that ticker if one is given and say so; otherwise
+  say the comparison uses daily_close. If a quote is marked STALE, say it may
+  not be current.
+- Grades, scores, and stances come from completed daily and weekly bars.
+  Never re-grade a stock from the live quote.
 """
 
 
@@ -634,6 +640,53 @@ def dashboard_context(
             f"headline={item.summary.headline}"
         )
     return "\n".join(lines)
+
+
+def live_quote_context(
+    question: str,
+    analyses: dict[str, StockAnalysis],
+    focus: str | None,
+) -> str:
+    """LIVE QUOTE block for the board ticker the question names and the focus.
+
+    At most two quote fetches (each cached briefly in ``olga.quotes``). Misses
+    are left out; if nothing came back the block is ``""`` and the prompt
+    tells Gemini that no live quote is in the context.
+    """
+    from . import quotes
+
+    wanted = [t for t in (_explicit_board_ticker(question, analyses), focus) if t]
+    lines: list[str] = []
+    for ticker in dict.fromkeys(wanted):
+        try:
+            quote = quotes.fetch(ticker)
+        except Exception:
+            quote = None
+        if quote is None or not math.isfinite(quote.last):
+            continue
+        parts = [f"{ticker}: last={_fmt(quote.last)}"]
+        when = _quote_when(quote.as_of)
+        if when:
+            parts.append(f"as_of={when}")
+        if quote.open is not None:
+            parts.append(f"open={_fmt(quote.open)}")
+        if quote.previous_close is not None and quote.previous_close > 0:
+            change = (quote.last / quote.previous_close - 1.0) * 100.0
+            parts.append(
+                f"previous_close={_fmt(quote.previous_close)} "
+                f"change_vs_previous_close={_fmt(change, '+.2f')}%"
+            )
+        parts.append(f"source={quote.detail}")
+        if is_stale(quote.as_of):
+            parts.append("STALE: more than 20 minutes old")
+        lines.append(" ".join(parts))
+    if not lines:
+        return ""
+    return (
+        "LIVE QUOTE (last trade; use for current price and for comparing price "
+        "to levels. Grades still come from completed daily bars):\n"
+        + "\n".join(lines)
+    )
 
 
 def _history_for_llm(
@@ -880,6 +933,9 @@ def answer(
                 settings=settings,
                 focus=focus,
             )
+            live = live_quote_context(q, analyses, focus)
+            if live:
+                snapshot = f"{snapshot}\n\n{live}"
             user = (
                 f"DASHBOARD CONTEXT (only source of numbers):\n{snapshot}\n\n"
                 f"USER QUESTION:\n{q}"
