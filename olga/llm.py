@@ -14,7 +14,7 @@ from typing import Any
 
 DEFAULT_PROJECT = "olga-trader"
 DEFAULT_LOCATION = "global"
-DEFAULT_MODEL = "gemini-3.7-flash"
+DEFAULT_MODEL = "gemini-4-hydrogen"
 
 
 def project() -> str:
