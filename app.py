@@ -21,6 +21,22 @@ PERIOD_CHOICES = {
     "5 years": "5y",
 }
 WEEKS_CHOICES = {"6 months": 26, "1 year": 52, "18 months": 78, "3 years": 156}
+METHOD_TAB = "How to read this"
+
+DISCLAIMER = """
+**Disclaimer.** OLGA Trader is an informational tool. It infers possible institutional
+activity from public price and volume. It does not prove who is buying or
+selling, it does not predict future prices, and it is not investment,
+trading, tax, or legal advice. You are solely responsible for your own
+decisions and for any money you put at risk.
+
+Andrew Randolph, We Work For You, LLC, and the OLGA Trader app are not
+liable for any losses, damages, costs, or claims arising from use of the
+app, reliance on its grades, charts, chat answers, or other output, or from
+errors, delays, outages, or incomplete data. Past readings are not a
+guarantee of future results. If you are not willing to accept that, do not
+use the app.
+"""
 
 st.set_page_config(
     page_title="OLGA Trader",
@@ -204,35 +220,109 @@ PROVIDER_OK, PROVIDER_KEY_NOTE = providers.key_status(ACTIVE_PROVIDER)
 if "nonce" not in st.session_state:
     st.session_state.nonce = 0
 
+WATCHLIST_KEY = f"watchlist_text_{identity.slug(viewer.key)}"
+ADD_TICKER_KEY = f"add_ticker_{identity.slug(viewer.key)}"
+if WATCHLIST_KEY not in st.session_state:
+    st.session_state[WATCHLIST_KEY] = "\n".join(cfg.tickers)
+
+
+def add_ticker() -> None:
+    """Append one symbol from the sidebar input. Runs before the script reruns."""
+    raw = st.session_state.get(ADD_TICKER_KEY, "").strip()
+    if not raw:
+        return
+    ticker = config.normalize_ticker(raw)
+    st.session_state.watchlist_rejected = None
+    st.session_state.watchlist_over_limit = None
+    st.session_state.add_ticker_note = None
+    if not ticker:
+        st.session_state.add_ticker_note = (
+            "warning",
+            f"“{raw}” is not a ticker symbol (letters, digits, . - = and a leading ^ only).",
+        )
+        return
+    current = config.load_for(viewer.key)
+    if ticker in current.tickers:
+        st.session_state.add_ticker_note = ("info", f"{ticker} is already on your watchlist.")
+        st.session_state[ADD_TICKER_KEY] = ""
+        return
+    if len(current.tickers) >= config.MAX_TICKERS:
+        st.session_state.add_ticker_note = (
+            "warning",
+            f"Your watchlist is full ({len(current.tickers)} of {config.MAX_TICKERS}). "
+            "Remove a ticker below before adding another.",
+        )
+        return
+    current.tickers = [*current.tickers, ticker]
+    config.save_user(viewer.key, current)
+    st.session_state[WATCHLIST_KEY] = "\n".join(current.tickers)
+    st.session_state[ADD_TICKER_KEY] = ""
+    st.session_state.add_ticker_note = ("success", f"Added {ticker}.")
+    st.session_state.nonce += 1
+
+
+def save_watchlist() -> None:
+    lines = [line.strip() for line in st.session_state[WATCHLIST_KEY].splitlines() if line.strip()]
+    st.session_state.watchlist_rejected = [
+        line for line in lines if not config.normalize_ticker(line)
+    ]
+    st.session_state.add_ticker_note = None
+    current = config.load_for(viewer.key)
+    tickers = config.dedupe(config.normalize_ticker(line) for line in lines)
+    current.tickers = tickers[: config.MAX_TICKERS]
+    st.session_state.watchlist_over_limit = tickers[config.MAX_TICKERS :] or None
+    config.save_user(viewer.key, current)
+    st.session_state[WATCHLIST_KEY] = "\n".join(current.tickers)
+    st.session_state.nonce += 1
+
+
 # --------------------------------------------------------------------------- #
 # Sidebar: the single control surface for everything below
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.markdown("### Watchlist")
     st.caption(f"Saved only for **{viewer.label}** — other users keep their own list.")
-    edited = st.text_area(
+    with st.form("add_ticker_form", clear_on_submit=False, border=False):
+        add_cols = st.columns([3, 2], vertical_alignment="bottom")
+        add_cols[0].text_input(
+            "Add a ticker",
+            key=ADD_TICKER_KEY,
+            placeholder="e.g. NVDA",
+            help="Yahoo-style symbol, e.g. NVDA, TTD, BRK-B. Press Enter or Add ticker. "
+            f"Up to {config.MAX_TICKERS} tickers.",
+        )
+        add_cols[1].form_submit_button(
+            "Add ticker", type="primary", width="stretch", on_click=add_ticker
+        )
+    note = st.session_state.get("add_ticker_note")
+    if note:
+        kind, text = note
+        getattr(st, kind)(text)
+
+    st.caption(
+        f"{len(cfg.tickers)} of {config.MAX_TICKERS} on your list · "
+        "edit in bulk below, one per line"
+    )
+    st.text_area(
         "One ticker per line",
-        value="\n".join(cfg.tickers),
         height=210,
         label_visibility="collapsed",
-        key=f"watchlist_text_{identity.slug(viewer.key)}",
+        key=WATCHLIST_KEY,
         help="Yahoo-style symbols, e.g. NVDA, TTD, BRK-B — translated to the "
         "active provider's spelling automatically. Saved to your account only.",
     )
-    if st.button("Save watchlist", width="stretch"):
-        lines = [line.strip() for line in edited.splitlines() if line.strip()]
-        st.session_state.watchlist_rejected = [
-            line for line in lines if not config.normalize_ticker(line)
-        ]
-        cfg.tickers = config.dedupe(config.normalize_ticker(line) for line in lines)
-        config.save_user(viewer.key, cfg)
-        st.session_state.nonce += 1
-        st.rerun()
+    st.button("Save watchlist", width="stretch", on_click=save_watchlist)
     rejected = st.session_state.get("watchlist_rejected")
     if rejected:
         st.warning(
             f"Skipped {len(rejected)} entr{'y' if len(rejected) == 1 else 'ies'} "
             "that are not ticker symbols (letters, digits, . - = and a leading ^ only)."
+        )
+    over_limit = st.session_state.get("watchlist_over_limit")
+    if over_limit:
+        st.warning(
+            f"Watchlist is limited to {config.MAX_TICKERS} tickers. "
+            f"Not saved: {', '.join(over_limit)}."
         )
 
     st.markdown("### View")
@@ -378,6 +468,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.info(DISCLAIMER)
+
+
+def open_method_tab() -> None:
+    st.session_state.olga_section = METHOD_TAB
+
+
+guide_cols = st.columns([2, 5], vertical_alignment="center")
+guide_cols[0].button(
+    "How to read this",
+    type="primary",
+    width="stretch",
+    on_click=open_method_tab,
+    key="how_to_read_cta",
+)
+guide_cols[1].markdown(
+    f"<span style='color:{PAL['text_secondary']};font-size:14px'>"
+    "New here? What the grades, signals, and distribution days mean.</span>",
+    unsafe_allow_html=True,
+)
+
 if result.errors:
     st.warning(
         "Could not load: "
@@ -419,7 +530,7 @@ tab_watchlist, tab_detail, tab_paper, tab_market, tab_ask, tab_method = st.tabs(
         "Paper trades",
         "Market pressure",
         "Ask OLGA",
-        "How to read this",
+        METHOD_TAB,
     ],
     key="olga_section",
     on_change="rerun",
@@ -856,25 +967,6 @@ with tab_paper:
             "The table is the full value view of the line."
         )
 
-        st.markdown(
-            """
-### Disclaimer
-
-OLGA Trader is an informational tool. It infers possible institutional
-activity from public price and volume. It does not prove who is buying or
-selling, it does not predict future prices, and it is not investment,
-trading, tax, or legal advice. You are solely responsible for your own
-decisions and for any money you put at risk.
-
-Andrew Randolph, We Work For You, LLC, and the OLGA Trader app are not
-liable for any losses, damages, costs, or claims arising from use of the
-app, reliance on its grades, charts, chat answers, or other output, or from
-errors, delays, outages, or incomplete data. Past readings are not a
-guarantee of future results. If you are not willing to accept that, do not
-use the app.
-            """
-        )
-
 # --------------------------------------------------------------------------- #
 # Market pressure
 # --------------------------------------------------------------------------- #
@@ -1110,21 +1202,6 @@ dividend-adjusted on every provider except Polygon. Bars here come from
 expects; when the provider cannot serve an index with volume, an ETF proxy
 stands in and the app says so above. Index volume is revised intraday, so the
 newest session can shift.
-
-### Disclaimer
-
-OLGA Trader is an informational tool. It infers possible institutional
-activity from public price and volume. It does not prove who is buying or
-selling, it does not predict future prices, and it is not investment,
-trading, tax, or legal advice. You are solely responsible for your own
-decisions and for any money you put at risk.
-
-Andrew Randolph, We Work For You, LLC, and the OLGA Trader app are not
-liable for any losses, damages, costs, or claims arising from use of the
-app, reliance on its grades, charts, chat answers, or other output, or from
-errors, delays, outages, or incomplete data. Past readings are not a
-guarantee of future results. If you are not willing to accept that, do not
-use the app.
         """
     )
 

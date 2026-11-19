@@ -96,6 +96,9 @@ class Config:
 # anything else (prose, markup) is rejected here rather than escaped later.
 _TICKER = re.compile(r"\^?[A-Z0-9][A-Z0-9.=-]{0,14}")
 
+# Per-user watchlist size. Indexes come from the seed file and do not count.
+MAX_TICKERS = 25
+
 
 def normalize_ticker(raw: str) -> str:
     """Upper-cased symbol, or ``""`` if ``raw`` is not a plausible ticker."""
